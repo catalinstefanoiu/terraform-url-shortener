@@ -1,0 +1,20 @@
+# Provider plugins downloaded by `terraform init` (can be hundreds of MB)
+.terraform/
+
+# State files: a map of your real infrastructure; may contain sensitive data
+*.tfstate
+*.tfstate.*
+
+# Plans saved with `terraform plan -out`
+*.tfplan
+
+# Variable value files (may contain secrets) — revisited in stage 7
+*.tfvars
+
+# Crash logs and local overrides
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
