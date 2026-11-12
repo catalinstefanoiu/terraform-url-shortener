@@ -84,6 +84,30 @@ outputs.tf:    bucket_name = aws_s3_bucket.first.bucket
 - `No changes. Your infrastructure matches the configuration.` = codul, state-ul și AWS sunt identice.
 - Cu un singur state, `dev` și `prod` nu pot exista în același timp: schimbarea mediului înlocuiește resursele (rezolvăm în etapa 7).
 
+### Remote state
+
+- State-ul local, ținut pe laptop, are trei probleme: se pierde odată cu laptopul, nu-l poate folosi altcineva (coleg, CI) și poate conține secrete.
+- **Backend**: locul unde Terraform ține state-ul. `backend "s3"` îl ține într-un bucket S3.
+- **Locking**: cât timp o rulare modifică state-ul, alta nu poate. Cu `use_lockfile = true` (Terraform 1.10+), lock-ul e un fișier `.tflock` în S3.
+- **Problema oul-găina**: bucket-ul pentru state trebuie să existe *înainte* ca vreun proiect să-și pună state-ul în el. De aceea se creează separat, dintr-un folder `bootstrap/` cu state local.
+- Bucket-ul de state nu e administrat de proiectul care își ține state-ul în el: un `destroy` ar șterge și locul unde e ținută evidența.
+
+- Blocul `backend` **nu acceptă** variabile sau locals: valorile se scriu direct.
+- `key` = calea fișierului de state în bucket (de exemplu `dev/terraform.tfstate`). Un bucket poate ține state-urile mai multor proiecte sau medii, fiecare la alt `key`.
+- `terraform init -migrate-state` mută state-ul existent din vechiul backend (local) în cel nou (S3). După migrare, `terraform.tfstate` local rămâne gol (0 bytes), iar `.backup` are copia veche; amândouă se pot șterge.
+- `.terraform/terraform.tfstate` **nu** e state-ul: e doar notița lui Terraform despre ce backend folosește folderul.
+- Comenzile Terraform lucrează în folderul curent: verifică promptul înainte de `init`, `plan`, `apply`.
+- Lock-ul apare în S3 ca `dev/terraform.tfstate.tflock` doar cât rulează o comandă; cu versioning, rămâne vizibil în istoric (Show versions).
+- Cum funcționează lock-ul în S3: Terraform scrie `.tflock` cu condiția „doar dacă nu există deja”. Dacă există, S3 răspunde `412 PreconditionFailed` și Terraform afișează `Error acquiring the state lock`.
+- Eroarea arată cine ține lock-ul: `Who` (user@calculator), `Operation` (apply, plan), `Created` (de când, în UTC), `ID` (pentru `force-unlock`).
+- `apply` fără schimbări nu cere `yes` și eliberează lock-ul imediat.
+- `-lock=false` dezactivează lock-ul: nu se folosește în practică.
+- `terraform force-unlock <LOCK_ID>`: scoate un lock rămas blocat (de exemplu după un crash). Doar dacă ești sigur că nu mai rulează nimeni.
+
+### Lifecycle
+
+- `lifecycle { prevent_destroy = true }`: Terraform refuză orice plan care ar șterge resursa. Pentru resurse critice (state, baze de date).
+
 ### Comenzi
 
 | Comandă | Ce face |
@@ -112,6 +136,8 @@ outputs.tf:    bucket_name = aws_s3_bucket.first.bucket
 - `-/+` înlocuire: unele atribute nu se pot schimba pe o resursă existentă (de exemplu numele unui bucket), așa că Terraform o șterge și o creează din nou. Atributul vinovat e marcat în plan cu `# forces replacement`.
 - **Atenție la `-/+`**: resursa veche dispare cu tot cu datele din ea. Într-o firmă, un `-/+` neașteptat pe o bază de date e motiv de oprire.
 - `- destroy`: resursa va fi ștearsă.
+- O valoare care **depinde** de o resursă încă necreată apare tot `(known after apply)`, de exemplu `bucket = aws_s3_bucket.state.id`.
+- Planul listează resursele **alfabetic**, nu în ordinea execuției. Ordinea reală o vezi la `apply`.
 - Data source-urile apar ca `Reading...` la începutul planului: sunt citite înainte de orice altceva.
 - `Changes to Outputs`: ce outputs se vor schimba după `apply`.
 - `Refreshing state...`: înainte de plan, Terraform citește starea reală din AWS. Așa observă și schimbările făcute de altcineva din consolă.
@@ -156,6 +182,9 @@ outputs.tf:    bucket_name = aws_s3_bucket.first.bucket
 ### S3
 
 - Un bucket nou are implicit criptare (`AES256`), versionare oprită și acces doar pentru contul tău.
+- În providerul AWS v4+, setările unui bucket sunt resurse separate: `aws_s3_bucket_versioning`, `aws_s3_bucket_server_side_encryption_configuration`, `aws_s3_bucket_public_access_block`. Se leagă de bucket prin `bucket = aws_s3_bucket.x.id`.
+- **Versioning**: S3 păstrează fiecare versiune a unui fișier. Pentru state, înseamnă că poți reveni la o versiune bună dacă cea curentă se strică.
+- **Public access block**: patru setări care blochează orice formă de acces public. Pentru state, toate pe `true`.
 - Un bucket nu poate fi redenumit. Pentru alt nume se creează un bucket nou.
 - `force_destroy = false` (implicit): Terraform refuză să șteargă un bucket care conține fișiere. E o plasă de siguranță împotriva pierderii datelor.
 - ARN-ul unui bucket nu are regiune și cont (`arn:aws:s3:::nume`), pentru că numele e deja unic în toată lumea.
