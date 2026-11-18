@@ -135,6 +135,42 @@ var.aws_region ─► provider region ──────────────
 
 ---
 
+## Documentație (unde mă uit)
+
+**Terraform Registry**: o pagină pentru fiecare resursă și data source.
+- Adresa: `registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/<tip-fără-aws_>`, iar pentru data sources `.../docs/data-sources/<tip>`.
+- Secțiunile unei pagini:
+  - **Example Usage**: cod gata de adaptat.
+  - **Argument Reference**: ce **scrii** în bloc (*Required* = obligatoriu, *Optional* = opțional).
+  - **Attribute Reference**: ce poți **citi** după creare (`.arn`, `.id`, `.json`).
+  - **Import**: cum aduci în Terraform o resursă creată manual.
+- Versiunea providerului se alege din meniul din stânga sus. `latest` e ok cât timp suntem pe 6.x.
+- În VS Code: mouse-ul pe tipul resursei arată descrierea și un link spre documentație.
+
+**Limbajul Terraform**: developer.hashicorp.com/terraform/language (variabile, data sources, `lifecycle`…).
+
+**AWS**:
+- docs.aws.amazon.com: ghidul fiecărui serviciu.
+- **Service Authorization Reference**: lista exactă de acțiuni IAM ale unui serviciu (de exemplu `dynamodb:GetItem`) și pe ce ARN-uri se aplică.
+
+| Subiect | Link |
+|---|---|
+| `aws_caller_identity` | https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/caller_identity |
+| `aws_iam_policy_document` | https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document |
+| `aws_iam_role` | https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role |
+| `aws_iam_role_policy` | https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy |
+| `aws_dynamodb_table` | https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/dynamodb_table |
+| Data sources (limbaj) | https://developer.hashicorp.com/terraform/language/data-sources |
+| `TF_LOG` (debugging) | https://developer.hashicorp.com/terraform/internals/debugging |
+| Roluri IAM | https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles.html |
+| Chei temporare (STS) | https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp.html |
+| Rolul de execuție Lambda | https://docs.aws.amazon.com/lambda/latest/dg/lambda-intro-execution-role.html |
+| Elementele unei politici JSON | https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements.html |
+| Acțiunile IAM pentru DynamoDB | https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazondynamodb.html |
+| Formatul ARN | https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_identifiers.html |
+
+---
+
 ## Terraform
 
 ### Piesele de bază
@@ -147,6 +183,7 @@ Terraform lucrează cu trei piese:
 
 ### Sintaxa
 
+- **HCL** (HashiCorp Configuration Language) = limbajul fișierelor `.tf`. E **declarativ**: descrii *ce* vrei să existe, nu pașii prin care se creează.
 - Blocul `terraform { ... }` spune ce versiune de Terraform și ce provideri folosește proiectul.
 - Blocul `provider "aws" { ... }` configurează providerul (de exemplu regiunea). Cheile de acces **nu** se scriu aici: providerul le citește singur din `~/.aws`.
 - `resource "aws_s3_bucket" "first"`: primul nume e **tipul** (definit de provider), al doilea e **numele local**, ales de tine. Împreună formează adresa resursei: `aws_s3_bucket.first`.
@@ -164,6 +201,12 @@ Terraform lucrează cu trei piese:
 - **`locals`**: valori calculate o singură dată și refolosite (prefixe de nume, tag-uri comune). Se folosesc cu `local.nume`. Nu pot fi schimbate din exterior.
 - **`output`**: o valoare afișată după `apply`, pe care o citești cu `terraform output`. Pe outputs se bazează legătura cu alte unelte și, mai târziu, cu alte module.
 - **`data`** (data source): **citește** informații care există deja (de exemplu ID-ul contului), fără să creeze nimic. Se folosește cu `data.tip.nume.atribut`.
+- Data sources de două feluri: unele **întreabă AWS** (`aws_caller_identity` face un apel STS `GetCallerIdentity` la fiecare `plan`), altele doar **calculează local** (`aws_iam_policy_document`). Cum le deosebești:
+  - **Regula:** dacă rezultatul conține ceva ce n-ai scris nicăieri (ID-ul contului), vine din AWS. Dacă e făcut doar din ce i-ai dat, e calcul local.
+  - **Documentația** (registry.terraform.io): „Use this data source to **get**…” înseamnă că întreabă AWS, „**Generates**…” înseamnă că calculează local.
+  - **Dovada:** `TF_LOG=DEBUG terraform plan 2>&1 | grep "HTTP Request Sent" | grep -o "rpc.method=[^ ]*" | sort | uniq -c` listează fiecare apel API pe care îl face planul.
+- Un `plan` face apeluri pentru: citirea state-ului din S3 (`S3/GetObject`), verificarea identității (`STS/GetCallerIdentity`) și **refresh**, adică citirea fiecărei resurse din state ca să vadă dacă s-a schimbat ceva în AWS (`DynamoDB/DescribeTable`).
+- `data "aws_iam_policy_document"`: scrii politica IAM în HCL în loc de JSON, iar `.json` ți-o dă gata convertită. Nu întreabă AWS nimic, doar generează text local, verificat de Terraform.
 - **Interpolare**: `"${var.a}-${local.b}"` construiește un string din alte valori.
 - **`default_tags`** în provider: tag-uri puse automat pe **toate** resursele, ca să nu le repeți la fiecare.
 - Variabilă **fără `default`** = obligatorie: Terraform cere valoarea la `plan`.
@@ -309,6 +352,20 @@ outputs.tf:    bucket_name = aws_s3_bucket.first.bucket
 - **AWS managed** vs **customer managed**: politici scrise de AWS vs politici scrise de tine (pe cele proprii le scriem în Terraform).
 - **Grupuri**: pui politicile pe un grup și userii în grup. Util când ai mulți useri cu aceleași drepturi.
 - **Roluri**: identități pe care le „preia” un serviciu (de exemplu Lambda). *Service-linked roles* sunt create automat de AWS: nu le șterge.
+- Un rol are **două** politici:
+  - **Trust policy** (`assume_role_policy`): **cine** poate purta rolul. Pentru noi, doar `lambda.amazonaws.com`.
+  - **Permissions policy**: **ce** poate face cine îl poartă.
+- Rolul nu are parolă și nici chei permanente. Cine îl preia primește de la **STS** chei **temporare**, care expiră singure. E mai sigur decât cheile unui user.
+- **STS** (Security Token Service) e serviciul AWS care emite chei temporare: access key (`ASIA…`, nu `AKIA…` ca la chei permanente), secret și session token. `aws sts get-caller-identity` e tot un apel STS („cine sunt?”).
+- La Lambda, AWS cere singur cheile de la STS și le pune în variabilele de mediu ale funcției (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`). SDK-ul le citește automat, deci codul nu atinge nicio cheie.
+- `principals.type`: `Service` (un serviciu AWS), `AWS` (un cont, user sau rol), `Federated` (identitate din afară, de exemplu GitHub prin OIDC, în etapa 8).
+- **Least privilege** (drepturi minime): dai doar acțiunile necesare, doar pe resursele necesare. Exemplu: `dynamodb:GetItem` + `PutItem` doar pe ARN-ul tabelului, nu `dynamodb:*` pe `*`.
+- În Service Authorization Reference, `table*` la *Resource types* înseamnă că acțiunea se aplică obligatoriu pe un ARN de tabel. Coloana *Condition keys* (de exemplu `dynamodb:LeadingKeys`) permite restricții și mai fine, până la nivel de cheie.
+- `max_session_duration = 3600` pe rol: cheile temporare de la STS țin cel mult 1 oră (se poate între 1 și 12 ore). Lambda le reînnoiește singură.
+- În JSON-ul politicii, ordinea din `Action` nu contează (e o mulțime), iar o listă cu un singur element apare ca text simplu (`"Resource": "arn:..."`).
+- `effect` în `aws_iam_policy_document` e opțional, implicit `Allow`. Îl scriem totuși, ca să se citească mai ușor.
+- **Inline policy** (`aws_iam_role_policy`): trăiește și moare odată cu rolul, ca o politică „personală”. **Managed policy** (`aws_iam_policy` + attachment): se poate atașa la mai multe roluri.
+- Dacă IAM refuză o acțiune, eroarea e `AccessDenied` / `is not authorized to perform`.
 - Datele de facturare sunt ascunse userilor IAM până când root-ul activează „IAM user and role access to Billing information”.
 
 ### S3
@@ -346,7 +403,24 @@ arn:aws:<serviciu>:<regiune>:<cont>:<resursă>
 arn:aws:iam::145050022460:user/admin
 ```
 
-Câmpul de regiune e gol la IAM, pentru că IAM e global.
+Câmpul de regiune e gol la IAM, pentru că IAM e global. Exemplu cu toate câmpurile: `arn:aws:dynamodb:eu-north-1:145050022460:table/url-shortener-dev-links`. În politicile IAM, `resources` primește ARN-uri.
+
+### API, SDK, CLI
+
+- Orice acțiune în AWS e un apel **API** prin HTTPS (de exemplu `dynamodb:GetItem`).
+- **SDK** (Software Development Kit) = biblioteca unui limbaj de programare care face aceste apeluri. Lambda va folosi `@aws-sdk/client-dynamodb` (TypeScript).
+- Consola web, AWS CLI, Terraform și SDK-urile sunt toate doar clienți ai aceluiași API.
+
+### CloudTrail
+
+- Jurnalul contului: cine, ce apel API, când, de unde. **Event history** păstrează gratuit ultimele 90 de zile.
+- Exemplu: fiecare `terraform plan` apare ca `GetCallerIdentity` (sursa `sts.amazonaws.com`), cu user agent-ul `Terraform/1.17.1`.
+- Filtrare: **Lookup attributes**, un singur atribut odată (Event source, Event name, User name, Read-only…). `Read-only = false` arată doar modificările. Apelurile de citire, ca `GetCallerIdentity`, nu apar cu filtrul ăsta.
+- **CloudTrail ≠ logurile aplicației.** CloudTrail răspunde la „cine a făcut ce în contul AWS”. Ce scrie codul tău (`console.log`, erori) ajunge în **CloudWatch Logs**. Event history arată doar *management events* (creare, ștergere, configurare), nu și *data events* precum `GetItem`/`PutItem`. Pe acelea le poți activa separat, cu plată.
+- Data events pentru DynamoDB = operațiile pe item-uri (`GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, `Scan`, `Batch*`). Se activează pe un *trail* și costă aproximativ 0,10 USD la 100.000 de evenimente.
+- Evenimentele serviciilor globale (IAM, `CreateRole`) apar în Event history din regiunea **us-east-1** (N. Virginia), nu din eu-north-1.
+- În eveniment, `accessKeyId` arată tipul de cheie: `AKIA…` = cheie permanentă a unui user, `ASIA…` = cheie temporară de la STS (rol).
+- Se înregistrează și apelurile eșuate (`errorCode`). Exemplu: la crearea tabelului, `UpdateContinuousBackups` a eșuat de 5 ori („Please retry later”), iar providerul a reîncercat singur până a mers. De aici cele 34 de secunde.
 
 ### Chei de acces și AWS CLI
 
@@ -354,6 +428,8 @@ Câmpul de regiune e gol la IAM, pentru că IAM e global.
 - Nu o pui niciodată în cod, în chat sau pe GitHub. Nu crea niciodată chei pentru root.
 - `aws configure` le salvează în `~/.aws/credentials`, de unde le citesc automat AWS CLI și Terraform, indiferent din ce folder rulezi.
 - `aws sts get-caller-identity` arată cu ce identitate rulezi. Primul lucru de verificat când ceva nu merge.
+- Forma oricărei comenzi: `aws <serviciu> <acțiune> --opțiuni`. Acțiunile `get-*`, `list-*` și `describe-*` doar citesc.
+- `--query '...'` (JMESPath) filtrează răspunsul și păstrează doar câmpul cerut, de exemplu `--query 'Role.AssumeRolePolicyDocument'`. `--output text|json|table` schimbă formatul.
 
 ---
 
@@ -367,6 +443,7 @@ Câmpul de regiune e gol la IAM, pentru că IAM e global.
 - Un commit e deja un punct de salvare: poți reveni oricând la el. Branch-ul nu e o copie de siguranță, ci un loc unde lucrezi separat de `main`.
 - Fluxul folosit în echipe: branch nou → commit-uri → push → **pull request** (PR) → review → merge în `main`. În etapa 8, CI-ul va rula `terraform plan` automat pe fiecare PR.
 - Comenzi: `git switch -c <branch>` (creează și trece pe branch), `git push -u origin <branch>`, `gh pr create --fill`, `gh pr merge --squash --delete-branch`, apoi `git switch main` și `git pull`.
+- `git add <fișiere>` pune modificările în **staging** („astea intră în următorul commit”). `git commit -m "..."` salvează tot ce e în staging ca un punct în istorie, **doar local**. Pe GitHub ajunge abia la `git push`.
 - **Branch-urile nu izolează infrastructura.** State-ul și resursele din AWS sunt aceleași, indiferent pe ce branch ești. Un `apply` dat de pe un branch modifică resursele reale.
 
 ---
