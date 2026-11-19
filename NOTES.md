@@ -2,19 +2,19 @@
 
 Ce am învățat pe parcursul proiectului, pe scurt. Se actualizează la fiecare etapă.
 
-## Harta proiectului (după etapa 4)
+## Harta proiectului (etapa 5, după partea B)
 
 ```
-LAPTOP (D:\Projects\terraform-url-shortener)           AWS (eu-north-1)
+LAPTOP (D:\Projects\terraform-url-shortener)           AWS (eu-north-1, IAM e global)
 ┌──────────────────────────────────────┐
 │ bootstrap/  (state LOCAL)            │ ── apply ──►  url-shortener-tfstate-…   (versioning, criptare,
 │   main.tf, outputs.tf                │                 └─ dev/terraform.tfstate   fără acces public)
 └──────────────────────────────────────┘                    ▲        │
 ┌──────────────────────────────────────┐                    │ citește/scrie state
 │ rădăcina  (state REMOTE, în S3)      │ ───────────────────┘        │ + .tflock cât rulează
-│   backend.tf  versions.tf            │
-│   providers.tf variables.tf          │ ── apply ──►  url-shortener-dev-…-first (tag-uri automate)
-│   locals.tf main.tf outputs.tf       │
+│   versions.tf backend.tf providers.tf│
+│   variables.tf locals.tf             │ ── apply ──►  url-shortener-dev-links      (tabel DynamoDB)
+│   dynamodb.tf iam.tf outputs.tf      │               url-shortener-dev-lambda     (rol IAM + politică)
 └──────────────────────────────────────┘
         │ git push → PR → squash merge
         ▼
@@ -30,10 +30,14 @@ GITHUB: catalinstefanoiu/terraform-url-shortener   (codul, fără state și făr
 | `providers.tf` | `provider "aws"` | regiunea și tag-urile puse automat pe toate resursele |
 | `variables.tf` | `aws_region`, `project_name`, `environment` | intrările: valori care se pot schimba din exterior, cu validări |
 | `locals.tf` | `data "aws_caller_identity"` + `locals` | calcule interne: ID-ul contului, prefixul de nume, tag-urile comune |
-| `main.tf` | `resource "aws_s3_bucket" "first"` | resursele create în AWS (deocamdată bucket-ul de învățare) |
-| `outputs.tf` | `bucket_name`, `bucket_arn`, `account_id` | ce afișează Terraform după `apply` |
+| `dynamodb.tf` | `resource "aws_dynamodb_table" "links"` | baza de date: cod scurt → URL lung |
+| `iam.tf` | 2 × `data "aws_iam_policy_document"`, `aws_iam_role`, `aws_iam_role_policy` | identitatea lui Lambda (cine o poate purta) + ce are voie să facă |
+| `outputs.tf` | `account_id`, `table_name` | ce afișează Terraform după `apply` |
 | `bootstrap/main.tf` | bucket de state + versioning, criptare, acces public blocat | rulat o singură dată, cu state local |
 | `bootstrap/outputs.tf` | `state_bucket_name` | numele bucket-ului de state (copiat în `backend.tf`) |
+| `.gitignore` | ce NU urcă pe GitHub | state, `.terraform/`, `*.tfvars`, planuri salvate |
+| `.terraform.lock.hcl` | versiunea exactă a providerilor + hash-uri | generat de `init`; se pune în Git, ca toți să folosească aceeași versiune |
+| `NOTES.md` / `README.md` | documentație | notițele mele / prezentarea proiectului (refăcută în etapa 10) |
 
 ## Cum se compun valorile
 
@@ -295,6 +299,9 @@ outputs.tf:    bucket_name = aws_s3_bucket.first.bucket
 | `terraform destroy` | Șterge **tot** ce administrează proiectul, după confirmare (`yes`). |
 | `terraform state list` | Listează adresele resurselor din state. Doar citește. |
 | `terraform state show <adresă>` | Arată tot ce știe state-ul despre o resursă. Doar citește. |
+| `terraform plan -detailed-exitcode` | Răspunde prin codul de ieșire: `0` = nicio schimbare, `2` = există schimbări, `1` = eroare. Util în scripturi și în CI (etapa 8). |
+
+- **Nu modifica din consolă resursele făcute cu Terraform.** Orice „Save” din consolă e **drift**: următorul `plan` arată `~` și `apply` readuce resursa la ce scrie în cod. Consola o folosim doar ca să ne uităm.
 
 ### Tag-uri
 
@@ -363,6 +370,7 @@ outputs.tf:    bucket_name = aws_s3_bucket.first.bucket
 - În Service Authorization Reference, `table*` la *Resource types* înseamnă că acțiunea se aplică obligatoriu pe un ARN de tabel. Coloana *Condition keys* (de exemplu `dynamodb:LeadingKeys`) permite restricții și mai fine, până la nivel de cheie.
 - `max_session_duration = 3600` pe rol: cheile temporare de la STS țin cel mult 1 oră (se poate între 1 și 12 ore). Lambda le reînnoiește singură.
 - În JSON-ul politicii, ordinea din `Action` nu contează (e o mulțime), iar o listă cu un singur element apare ca text simplu (`"Resource": "arn:..."`).
+- Pagina unui rol în consolă: **Last activity** (când l-a folosit cineva ultima dată), **Tags** (din `default_tags`), **Generate policy based on CloudTrail events** (propune o politică minimă din ce a folosit rolul de fapt). O politică *Customer inline* are „Attached entities 0”, pentru că nu e un obiect separat.
 - `effect` în `aws_iam_policy_document` e opțional, implicit `Allow`. Îl scriem totuși, ca să se citească mai ușor.
 - **Inline policy** (`aws_iam_role_policy`): trăiește și moare odată cu rolul, ca o politică „personală”. **Managed policy** (`aws_iam_policy` + attachment): se poate atașa la mai multe roluri.
 - Dacă IAM refuză o acțiune, eroarea e `AccessDenied` / `is not authorized to perform`.
@@ -393,6 +401,20 @@ outputs.tf:    bucket_name = aws_s3_bucket.first.bucket
 - `put-item` cu o cheie care există deja **suprascrie** item-ul, fără avertisment. Ca să previi asta: condiția `attribute_not_exists(code)`, pe care o folosim în Lambda.
 - `ResourceNotFoundException` = tabelul nu există: numele e greșit sau ești în altă regiune.
 - Tipuri în DynamoDB JSON: `S` = string, `N` = număr, `BOOL`. Exemplu de item: `{"code": {"S": "abc123"}, "url": {"S": "https://..."}}`.
+
+### Lambda
+
+- O funcție Lambda = cod care rulează doar când e chemat (de un **eveniment**). Plătești per execuție, nu ai server de administrat.
+- **Handler-ul** e funcția exportată pe care o cheamă Lambda (`export async function handler(event)`). Primește evenimentul și întoarce răspunsul.
+- **Mediul de execuție** e refolosit între cereri. Ce e în afara handler-ului (clientul DynamoDB) se creează o singură dată, la *cold start*, apoi e refolosit, deci cererile următoare sunt mai rapide.
+- Evenimentul de la API Gateway HTTP API (payload 2.0): `routeKey` („POST /links”), `pathParameters`, `body` (text), `isBase64Encoded`, `requestContext.domainName`.
+- Răspunsul: `{ statusCode, headers, body }`. `302` + header-ul `location` = redirect temporar: browserul nu-l ține minte, deci fiecare click trece prin Lambda.
+- `return` cu 4xx = răspuns normal. `throw` = **eroare de funcție**: API Gateway răspunde 500 și crește metrica **Errors**, pe care o urmărește alarma din partea E.
+- **Scriere condiționată**: `ConditionExpression: "attribute_not_exists(code)"` scrie doar dacă cheia nu există. Altfel DynamoDB aruncă `ConditionalCheckFailedException`, iar codul încearcă alt cod.
+- Variabilele de mediu (`process.env.TABLE_NAME`) sunt setate din Terraform. Codul nu conține nume de resurse scrise direct. Le vezi în consolă (Lambda → Configuration → Environment variables) sau cu `aws lambda get-function-configuration --function-name <nume> --query Environment`. Pe laptop nu există, deci `process.env.TABLE_NAME` e `undefined`.
+- Rutele HTTP API au **șabloane**: `GET /{code}`. Pentru adresa `/k3x9Qa`, evenimentul conține `routeKey: "GET /{code}"` (șablonul), `rawPath: "/k3x9Qa"` (adresa reală) și `pathParameters: { code: "k3x9Qa" }` (ce a „umplut” golul `{code}`). `routeKey` trebuie scris exact, cu spațiu: `"GET /{code}"`.
+- `{code}` prinde **o singură** bucată de drum (`/k3x9Qa`, dar nu `/a/b`). Ca să prinzi mai multe bucăți există `{proxy+}`. Dacă nicio rută nu se potrivește, API Gateway răspunde singur `404 {"message":"Not Found"}`, iar Lambda nici nu e chemată.
+- `GET /links` se potrivește cu `GET /{code}` (cu `code = "links"`), pentru că metoda contează: `POST /links` e altă regulă.
 
 ### ARN (Amazon Resource Name)
 
@@ -448,11 +470,45 @@ Câmpul de regiune e gol la IAM, pentru că IAM e global. Exemplu cu toate câmp
 
 ---
 
+## Node.js, npm și TypeScript (aplicația din `app/`)
+
+- **Node.js** rulează JavaScript în afara browserului. Lambda folosește runtime-ul `nodejs24.x` (suport până în aprilie 2028), aceeași versiune ca pe laptop.
+- **npm** instalează pachete (biblioteci) din registry-ul npm.
+
+| npm | echivalent Terraform | rol |
+|---|---|---|
+| `package.json` | `versions.tf` | ce pachete și ce interval de versiuni cere proiectul |
+| `package-lock.json` | `.terraform.lock.hcl` | versiunile exacte instalate. **Se pune în Git.** |
+| `node_modules/` | `.terraform/` | pachetele descărcate, refăcute de `npm install`. **NU se pune în Git.** |
+
+- `package-lock.json` e creat de **primul** `npm install` și actualizat de fiecare `npm install` următor. Pentru fiecare pachet ține `version`, `resolved` (de unde s-a descărcat) și `integrity` (hash `sha512`, ca hash-urile din `.terraform.lock.hcl`).
+- Lock-ul conține și pachetele **indirecte** (dependențele dependențelor). La noi: 5 directe, 80 în total. Conține și variantele esbuild pentru toate sistemele (Windows, Linux, Mac), dar se instalează doar cea potrivită (`@esbuild/win32-x64`).
+- `npm ci` instalează **exact** ce scrie în lock, fără să-l modifice. Se folosește în CI (etapa 8).
+- `dependencies` ajung în codul care rulează în Lambda (SDK-ul AWS). `devDependencies` sunt doar unelte de dezvoltare (TypeScript, esbuild, tipuri).
+- `^3.1171.0` = orice 3.x de la 3.1171.0 în sus, fără 4.0. E ca `~> 6.0` din Terraform.
+- **TypeScript** = JavaScript cu tipuri, iar `tsc --noEmit` verifică tipurile fără să genereze fișiere. **esbuild** împachetează codul și toate pachetele folosite într-un singur fișier (`dist/index.js`), adică ce urcă în Lambda.
+- `npm run <script>` rulează o comandă din secțiunea `scripts` a `package.json`. `npx <unealtă>` rulează o unealtă instalată în proiect.
+- TypeScript de bază, cum apare în `handler.ts`:
+  - `const` = valoare care nu se mai schimbă.
+  - `async`/`await` = „așteaptă răspunsul” (de la DynamoDB) fără să blocheze.
+  - `try { … } catch (err) { … }` = „încearcă; dacă apare o eroare, sari în catch”.
+  - `throw` = aruncă o eroare mai departe.
+  - `for (let i = 1; i <= 3; i++)` = repetă de 3 ori. `continue` = sari direct la următoarea repetare.
+  - `instanceof` (cu `o` mic) = „e eroarea de tipul X?”.
+  - `` `text ${valoare}` `` = interpolare, ca în Terraform.
+  - `const { url } = obiect` = **destructurare**: ia câmpul `url` din obiect într-o variabilă cu același nume. E același lucru cu `const url = obiect.url`.
+  - `string | undefined` = „text SAU lipsă” (tip uniune).
+  - `Promise<T>` = „îți dau un T, dar mai târziu”. Orice funcție `async` întoarce un `Promise`.
+  - `err instanceof X` întreabă: „eroarea prinsă e de tipul X?”. `continue` în `catch` sare la următoarea repetare a buclei `for`.
+- npm-ul nou nu mai rulează automat scripturile de instalare ale pachetelor (`npm warn install-scripts`). E o protecție împotriva pachetelor compromise. esbuild merge și fără.
+
 ## Windows și unelte
 
 - `winget install <pachet>` instalează programe din terminal.
 - **PATH** e lista de foldere în care terminalul caută programe. Un terminal o citește doar când pornește, deci după o instalare trebuie redeschis.
 - În Git Bash, `D:\Projects` se scrie `/d/Projects`.
 - Extensia **HashiCorp Terraform** din VS Code dă culori, autocompletare și erori direct în editor.
+- **Auto-import în VS Code:** când scrii un nume care încă nu există (de exemplu `json`), VS Code poate adăuga singur un `import` greșit sus în fișier (`import { json } from "node:stream/consumers"`). Verifică importurile după ce scrii cod. Când apare lista de sugestii, `Esc` o închide fără să accepte nimic. Auto-importurile se pot opri din Settings, căutând „auto imports”.
+- `Shift+Alt+F` (Format Document) aranjează indentarea codului TypeScript.
 - Dacă lași o ghilimea deschisă, Bash așteaptă continuarea comenzii (`>`). `Ctrl+C` anulează.
 - În **PowerShell 5.1**, JSON-ul trimis la `aws` pierde ghilimelele. Le scrii ca `\"` în interiorul `'...'`, de exemplu `'{\"code\":{\"S\":\"test1\"}}'`. În Git Bash merge JSON-ul normal.
