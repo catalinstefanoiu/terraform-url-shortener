@@ -146,6 +146,10 @@ var.aws_region ─► provider region ──────────────
 - Secțiunile unei pagini:
   - **Example Usage**: cod gata de adaptat.
   - **Argument Reference**: ce **scrii** în bloc (*Required* = obligatoriu, *Optional* = opțional).
+    - *Optional* nu înseamnă „pot să-l ignor”. Citesc **descrierea** fiecăruia și caut două lucruri:
+      - **condiții**: *„Must be specified if…”*. Exemplu: `integration_method` e Optional, dar obligatoriu dacă tipul nu e `MOCK`.
+      - **valoarea implicită**: *„Default is…”*. Exemplu: la `payload_format_version` e `1.0`, dar codul meu are nevoie de `2.0`.
+    - Exemplu: la `aws_apigatewayv2_integration` doar 2 argumente sunt Required (`api_id`, `integration_type`), însă eu scriu 5.
   - **Attribute Reference**: ce poți **citi** după creare (`.arn`, `.id`, `.json`).
   - **Import**: cum aduci în Terraform o resursă creată manual.
   - Pe paginile generate automat (de exemplu providerul `archive`), aceleași informații stau sub **Schema**: *Required* + *Optional* = ce scrii, *Read-Only* = ce citești.
@@ -179,6 +183,12 @@ var.aws_region ─► provider region ──────────────
 | `aws_lambda_function` | https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lambda_function |
 | `aws_cloudwatch_log_group` | https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_group |
 | `archive_file` | https://registry.terraform.io/providers/hashicorp/archive/latest/docs/data-sources/file |
+| `aws_apigatewayv2_api` | https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/apigatewayv2_api |
+| `aws_apigatewayv2_integration` | https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/apigatewayv2_integration |
+| `aws_apigatewayv2_route` | https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/apigatewayv2_route |
+| `aws_apigatewayv2_stage` | https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/apigatewayv2_stage |
+| `aws_lambda_permission` | https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lambda_permission |
+| Throttling HTTP API | https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-throttling.html |
 | Providerul `archive` (USE PROVIDER) | https://registry.terraform.io/providers/hashicorp/archive/latest |
 | `required_providers` | https://developer.hashicorp.com/terraform/language/providers/requirements |
 | Variabilele puse automat de Lambda | https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars-runtime.html |
@@ -243,6 +253,11 @@ Terraform lucrează cu trei piese:
 - Prefixe: `var.x`, `local.x`, `data.tip.nume.atribut`. O resursă se referă fără prefix: `aws_s3_bucket.first.arn`.
 - **`tip.nume.atribut`**: `aws_dynamodb_table.links.name` = tipul (din provider) + numele local (ales de mine, `"links"`) + atributul citit (din Attribute Reference).
   - Orice **argument** pe care îl scriu se poate citi și ca atribut: `aws_lambda_function.api.function_name`. La Attribute Reference scrie *„…exports the following attributes in addition to the arguments above”*.
+  - Blocul conține doar ce **trimit eu** la AWS (argumentele). Ce **generează AWS** la creare (`id`, `arn`, `api_endpoint`) nu se scrie în bloc: Terraform îl primește înapoi, îl salvează în state și îl pot citi ca atribut. Exemplu: `aws_apigatewayv2_api.http.id`, unde id-ul e *„API identifier”*, ceva de forma `aabbccddee`.
+  - În `plan`, aceste valori apar ca `(known after apply)`: încă nu există, pentru că AWS le dă abia la creare. Le văd după apply cu `terraform state show <tip.nume>`.
+  - **Cum verific dacă un atribut există:**
+    - **Înainte de creare:** Attribute Reference din docs. `terraform validate` verifică numele după schema providerului; un nume greșit dă *Unsupported attribute*.
+    - **După creare:** `terraform state list` (adresele din state), apoi `terraform state show <adresă>` (toate atributele, cu valori reale). Pe o resursă încă necreată: *No instance found for the given address!*
   - Data sources au în plus prefixul `data.`, deci 4 bucăți: `data.archive_file.lambda.output_path`.
   - Ce atribut pun într-un argument îmi spune **Argument Reference**-ul resursei care îl primește. Exemple: `aws_lambda_function.role` cere **ARN**-ul rolului (`.arn`), iar `aws_iam_role_policy.role` cere **numele** (`.id`, care la rol e chiar numele).
 - `local` vs `variable`: variabila vine din exterior, local-ul e un calcul intern, pe care nu-l poate suprascrie nimeni.
@@ -448,6 +463,10 @@ outputs.tf:    bucket_name = aws_s3_bucket.first.bucket
   - `output_file_mode = "0666"`: aceleași permisiuni de fișier în zip pe Windows și pe Linux (CI-ul din etapa 8), deci aceeași amprentă. Altfel planul ar cere update fără motiv.
   - `code_sha256` = amprenta zip-ului (`output_base64sha256`). Cod nou → amprentă nouă → Terraform urcă noua versiune. Terraform o compară cu amprenta reală din AWS (`CodeSha256`), deci vede și codul urcat manual din consolă (drift). Varianta veche, `source_code_hash`, e ținută doar în state și nu vede asta. `code_sha256` e opțional din providerul AWS 6.27.
   - `handler = "index.handler"` = fișierul `index.js` + funcția exportată `handler`.
+- **De la Terraform la TypeScript** (Terraform nu rulează niciodată codul, doar îl urcă și îl configurează):
+  1. **Build** (`npm run build`): esbuild face din `src/handler.ts` un singur fișier JavaScript, `dist/index.js`, cu tot cu SDK-ul AWS. Lambda nu rulează `.ts`, ci doar `.js`. Numele `index` vine din `--outfile=dist/index.js`, nu din sursă.
+  2. **Deploy** (`terraform apply`): `archive_file` face `lambda.zip`, iar `aws_lambda_function` urcă zip-ul și salvează în AWS setările `runtime = nodejs24.x` și `handler = index.handler`.
+  3. **Run** (la fiecare cerere): API Gateway apelează **Invoke**. Lambda pornește Node 24 (la cold start), despachetează zip-ul și încarcă `index.js`. Apoi ia funcția exportată `handler` și o apelează cu evenimentul: `handler(event)`. Obiectul returnat (`statusCode`, `headers`, `body`) ajunge la API Gateway, care îl transformă în răspuns HTTP.
   - `architectures = ["arm64"]` = procesoare Graviton, mai ieftine decât x86.
   - Log group-ul `/aws/lambda/<nume>` îl creăm noi, cu `retention_in_days`. Altfel Lambda l-ar crea singură, fără limită de timp și în afara Terraform.
   - API-ul AWS dă ARN-ul grupului **cu** `:*` la final (`aws logs describe-log-groups`). Terraform îl scoate din atributul `.arn`, deci în politică îl pui tu înapoi.
@@ -483,6 +502,40 @@ outputs.tf:    bucket_name = aws_s3_bucket.first.bucket
 - Rutele HTTP API au **șabloane**: `GET /{code}`. Pentru adresa `/k3x9Qa`, evenimentul conține `routeKey: "GET /{code}"` (șablonul), `rawPath: "/k3x9Qa"` (adresa reală) și `pathParameters: { code: "k3x9Qa" }` (ce a „umplut” golul `{code}`). `routeKey` trebuie scris exact, cu spațiu: `"GET /{code}"`.
 - `{code}` prinde **o singură** bucată de drum (`/k3x9Qa`, dar nu `/a/b`). Ca să prinzi mai multe bucăți există `{proxy+}`. Dacă nicio rută nu se potrivește, API Gateway răspunde singur `404 {"message":"Not Found"}`, iar Lambda nici nu e chemată.
 - `GET /links` se potrivește cu `GET /{code}` (cu `code = "links"`), pentru că metoda contează: `POST /links` e altă regulă.
+
+### API Gateway (HTTP API)
+
+- **Ușa publică** a aplicației: primește cereri HTTP de pe internet, le transformă în **evenimente** (payload 2.0) pentru Lambda și trimite înapoi răspunsul funcției.
+- Piesele, fiecare cu resursa ei în Terraform (`apigateway.tf`):
+  - **API** (`aws_apigatewayv2_api`): containerul, cu adresa `https://<id>.execute-api.<regiune>.amazonaws.com` (`api_endpoint`).
+  - **Integration** (`aws_apigatewayv2_integration`): **unde** trimite cererile. `AWS_PROXY` = toată cererea merge la Lambda, iar răspunsul funcției vine înapoi neschimbat.
+  - **Route** (`aws_apigatewayv2_route`): `METODĂ /drum` → integrare. `route_key` e exact `routeKey` din eveniment.
+  - **Stage** (`aws_apigatewayv2_stage`): versiunea publicată. `$default` = API-ul e servit direct la rădăcină, fără `/dev` în adresă. `auto_deploy = true` = orice schimbare intră imediat.
+    - `auto_deploy` are implicit `false`. Fără el, rutele și integrarea există, dar nu sunt **publicate**: ar trebui creat manual un **deployment** (`aws_apigatewayv2_deployment`) și refăcut la fiecare schimbare.
+- Pe scurt, ca o clădire: **API** = adresa clădirii, **route** = plăcuța de pe ușă (`POST /links`), **integration** = biroul unde ajunge cererea (Lambda), **stage** = clădirea deschisă publicului, cu program și limită de vizitatori (throttling), **lambda_permission** = ecusonul care îl lasă pe API Gateway să intre la Lambda.
+- **Capcane din documentație:**
+  - `target` are formatul `integrations/<id>`, **cu `s`**. `validate` și `plan` nu verifică textul din interiorul unui string, iar în plan `target` apare oricum ca `(known after apply)`. O greșeală acolo iese la iveală abia la apply sau la primul apel.
+  - `payload_format_version` are implicit `"1.0"`. Codul meu așteaptă **2.0**, deci trebuie scris explicit.
+  - `integration_method = "POST"` e obligatoriu și nu are legătură cu metoda clientului: API Gateway apelează Lambda prin API-ul `Invoke`, care e mereu POST.
+  - `integration_uri` primește `invoke_arn`, nu `arn` (Attribute Reference la `aws_lambda_function`: *„to be used for invoking Lambda Function from API Gateway”*).
+    - `arn` = **numele** funcției: `arn:aws:lambda:eu-north-1:<cont>:function:url-shortener-dev-api`.
+    - `invoke_arn` = **adresa de apel** pentru API Gateway: `arn:aws:apigateway:eu-north-1:lambda:path/2015-03-31/functions/<arn-ul de mai sus>/invocations`. E calea API-ului Lambda **Invoke** (`POST /2015-03-31/functions/<fn>/invocations`), de aici și `integration_method = "POST"`.
+    - Le văd pe amândouă cu `terraform state show aws_lambda_function.api`.
+- **Throttling** pe stage (`default_route_settings`): `rate_limit` = cereri pe secundă în medie, `burst_limit` = vârf scurt permis. Peste limită, clientul primește **429 Too Many Requests**, iar Lambda nu e apelată, deci nu plătesc.
+  - Limita implicită a **contului**, pe regiune, comună pentru **toate** API-urile (HTTP, REST, WebSocket): **10.000 cereri/s**, cu burst de **5.000**. În eu-north-1 e cea standard; unele regiuni noi au 2.500/1.250.
+  - Limita de pe stage sau rută nu poate depăși limita contului. Valoarea reală: `aws service-quotas get-service-quota --service-code apigateway --quota-code L-8A5B8E43` (*Throttle rate*, 10000 la mine).
+  - De ce 5/10 la mine: fără o limită proprie, un singur API poate consuma toată limita contului, adică până la 10.000 de apeluri Lambda pe secundă, pe banii mei.
+- **`aws_lambda_permission`** = politica **resource-based** a funcției: *cine* o poate apela. `principal = "apigateway.amazonaws.com"` + `source_arn = "${…execution_arn}/*"` = doar **acest** API, din orice stage, metodă sau drum. Fără `source_arn`, orice API Gateway din orice cont ar putea-o apela, dacă îi știe ARN-ul.
+  - `principal` = **CINE** apelează: un *service principal*, adică un nume fix, dat de AWS, de forma `<serviciu>.amazonaws.com`. Nu îl inventez eu. Același tip de nume e și `lambda.amazonaws.com` din trust policy.
+  - `source_arn` = **DE UNDE** vine apelul: ARN-ul API-ului **meu**, de forma `arn:aws:execute-api:eu-north-1:<cont>:<api-id>/*`. Fiecare cerere are un ARN de forma `<api-id>/$default/POST/links`, iar `/*` le acoperă pe toate.
+- **Unde se apelează Invoke:** nici în Terraform, nici în codul meu, ci **în serverele API Gateway**. La fiecare cerere care se potrivește cu o rută, API Gateway face apelul HTTP `POST /2015-03-31/functions/<arn>/invocations` către serviciul Lambda, cu evenimentul ca body. Adresa e chiar `integration_uri` (`invoke_arn`).
+  - E același API **Invoke** ca la `aws lambda invoke`. Diferă doar cine apelează: atunci eram **eu** (verificat prin drepturile mele IAM), acum e **API Gateway** (verificat prin politica resource-based a funcției).
+  - Verificare: `aws apigatewayv2 get-integrations --api-id <id>` arată `IntegrationUri`; `aws lambda get-policy --function-name <fn>` arată regula, cu `Condition` → `ArnLike` → `AWS:SourceArn`.
+- `auto_deploy = true` a creat singur un **deployment** (`DeploymentId` în `aws apigatewayv2 get-stage`), fără resursă separată în Terraform.
+- **Testare cu curl:**
+  - În **Git Bash**, JSON-ul se scrie între apostrofuri, fără backslash: `-d '{"url": "https://..."}'`. Între apostrofuri, bash nu interpretează nimic, deci `\"` ar ajunge la server exact ca `\"`, adică JSON invalid → **400** de la codul meu.
+  - În **PowerShell 5.1**: `curl.exe` (simplul `curl` e alias pentru `Invoke-WebRequest`), iar ghilimelele din JSON trebuie scrise `\"`.
+  - Headerul `Apigw-Requestid` din răspuns = `event.requestContext.requestId` din logul Lambda, deci așa găsesc logul unei cereri.
 
 ### ARN (Amazon Resource Name)
 
