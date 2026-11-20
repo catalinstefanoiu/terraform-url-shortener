@@ -36,9 +36,9 @@ resource "aws_lambda_function" "api" {
     }
   }
 
-  # The log group must exist (with its retention) before the function first writes to it.
+  # Create the log group and the log permissions first, so the very first run can write logs.
   depends_on = [
     aws_cloudwatch_log_group.lambda, # where the logs go
-    aws_iam_role_policy.lambda       # the right to write them
+    aws_iam_role_policy.lambda,      # the right to write them
   ]
 }

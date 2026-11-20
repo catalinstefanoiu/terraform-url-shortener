@@ -452,6 +452,31 @@ outputs.tf:    bucket_name = aws_s3_bucket.first.bucket
   - Log group-ul `/aws/lambda/<nume>` îl creăm noi, cu `retention_in_days`. Altfel Lambda l-ar crea singură, fără limită de timp și în afara Terraform.
   - API-ul AWS dă ARN-ul grupului **cu** `:*` la final (`aws logs describe-log-groups`). Terraform îl scoate din atributul `.arn`, deci în politică îl pui tu înapoi.
   - Verificare după apply: `CodeSha256` din `aws lambda get-function-configuration` = `code_sha256` din plan, adică AWS are exact zip-ul de pe laptop.
+- **Test din terminal, fără API Gateway:** `aws lambda invoke --function-name <nume> --payload fileb://app/events/<fișier>.json build/response.json`.
+  - Evenimentul de test e un JSON care **imită** ce trimite API Gateway (`routeKey`, `body`, `requestContext`…). Îl țin în `app/events/`.
+  - `fileb://` = trimite fișierul exact cum e (bytes). Cu `file://`, CLI v2 ar crede că e base64.
+  - **Două coduri de stare diferite:** `"StatusCode": 200` pe ecran = Lambda a rulat funcția. `"statusCode": 201` în `response.json` = ce a returnat **codul meu** (API Gateway îl va trimite browserului).
+- **Logurile unei rulări** (`aws logs tail`, în Git Bash cu `MSYS_NO_PATHCONV=1`):
+  - `INIT_START` = **cold start**: o instanță nouă pornește și încarcă `index.js`. Apare doar la prima rulare a instanței.
+  - `START` / `END` = începutul și sfârșitul unei cereri. `RequestId` e ID-ul **Lambda**, diferit de `requestId` din eveniment (al API Gateway).
+  - Liniile mele (`console.log`) primesc în față ora, RequestId și `INFO`.
+  - `REPORT`: `Duration` = cât a rulat handler-ul. `Init Duration` = cold start-ul. `Billed Duration` ≈ Init + Duration, rotunjit în sus (din 2025, AWS taxează și init-ul). `Max Memory Used` din `Memory Size`.
+  - Prima rulare: aproximativ 800 ms doar pentru primul `PutItem` (conexiune nouă, chei, TLS). Rulările următoare pe aceeași instanță („warm”) sunt mult mai rapide.
+  - Numele log stream-ului: `2026/11/20/[$LATEST]<id>` = un stream pentru fiecare instanță. E bucata acoperită de `:*` din politică.
+  - **Cold vs warm, măsurat la C4:**
+
+    | Apel | Instanță | Duration |
+    |---|---|---|
+    | redirect, după 9 minute de pauză | **nouă** (alt log stream, `INIT_START`) | 959 ms: prima conexiune la DynamoDB |
+    | 404, câteva secunde mai târziu | aceeași, **warm** | 65 ms: un `GetItem` pe conexiune deja deschisă |
+    | 400 (`javascript:`) | aceeași, warm | 5 ms: nu ajunge deloc la DynamoDB |
+  - O instanță nefolosită câteva minute e oprită de Lambda. Următorul apel are din nou cold start. Timpul nu e garantat.
+- **Consola Lambda:**
+  - **Code**: în *Explorer* dai click pe `index.js` ca să-l deschizi. E codul minificat de esbuild, nu `handler.ts`. Nu apăsa **Deploy**: ar însemna drift.
+  - **Code properties**: *SHA256 hash* = `code_sha256`. Zip-ul e păstrat de Lambda într-un S3 al lui AWS, nu al meu.
+  - **Configuration → Permissions** are două politici diferite:
+    - *Execution role → Resource summary*: ce are voie **funcția** să facă (DynamoDB, loguri). E politica din rol.
+    - *Resource-based policy*: **cine** are voie să apeleze funcția. E goală până în partea D, când API Gateway primește dreptul (`aws_lambda_permission`).
 - Variabilele de mediu (`process.env.TABLE_NAME`) sunt setate din Terraform. Codul nu conține nume de resurse scrise direct. Le vezi în consolă (Lambda → Configuration → Environment variables) sau cu `aws lambda get-function-configuration --function-name <nume> --query Environment`. Pe laptop nu există, deci `process.env.TABLE_NAME` e `undefined`.
 - **`process.env`**: `process` = obiectul global Node.js care descrie programul pornit. `env` = **variabilele de mediu**, perechi `NUME=valoare` primite de program la pornire, de la cine îl lansează (Windows, Lambda). E același lucru ca `$env:USERNAME` în PowerShell.
 - Lambda pune singură și variabile proprii: `AWS_REGION` (de aici știe `new DynamoDBClient({})` regiunea) și `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`, adică cheile temporare **ASIA…** ale rolului, din STS. SDK-ul le citește singur, deci în cod nu apar chei.
@@ -486,6 +511,13 @@ Câmpul de regiune e gol la IAM, pentru că IAM e global. Exemplu cu toate câmp
 - Evenimentele serviciilor globale (IAM, `CreateRole`) apar în Event history din regiunea **us-east-1** (N. Virginia), nu din eu-north-1.
 - În eveniment, `accessKeyId` arată tipul de cheie: `AKIA…` = cheie permanentă a unui user, `ASIA…` = cheie temporară de la STS (rol).
 - Se înregistrează și apelurile eșuate (`errorCode`). Exemplu: la crearea tabelului, `UpdateContinuousBackups` a eșuat de 5 ori („Please retry later”), iar providerul a reîncercat singur până a mers. De aici cele 34 de secunde.
+- **Ce lasă o rulare Lambda în Event history:**
+  - `AssumeRole` (sts), făcut de `lambda.amazonaws.com` (userIdentity `AWSService`): Lambda ia chei **ASIA…** pentru rol. *Role session name* = numele funcției.
+  - `CreateLogStream` (logs), făcut de `AssumedRole` `url-shortener-dev-lambda/url-shortener-dev-api`, cu cheia ASIA… de mai sus = **funcția însăși**.
+  - **Nu apar:** `Invoke`, `PutItem`, `GetItem`, `PutLogEvents`. Sunt **data events**, care nu intră în Event history.
+  - **Request ID**-ul din `AssumeRole` = `RequestId`-ul din logul Lambda (`START RequestId: …`). Așa legi CloudTrail de CloudWatch Logs.
+  - Fiecare instanță nouă (cold start) face propriul `AssumeRole` și primește chei noi.
+  - Cheile primite de Lambda au `expiration` la **12 ore**. `max_session_duration` al rolului (1 oră) limitează doar cine cere chei prin API sau consolă (tabelul din ghidul IAM, *Using IAM roles*), nu serviciul Lambda.
 
 ### Chei de acces și AWS CLI
 

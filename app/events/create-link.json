@@ -1,0 +1,11 @@
+{
+  "version": "2.0",
+  "routeKey": "POST /links",
+  "rawPath": "/links",
+  "requestContext": {
+    "domainName": "test-api.example.com",
+    "requestId": "test-create-1"
+  },
+  "body": "{\"url\": \"https://developer.hashicorp.com/terraform\"}",
+  "isBase64Encoded": false
+}
