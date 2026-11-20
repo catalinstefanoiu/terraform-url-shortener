@@ -28,7 +28,14 @@ data "aws_iam_policy_document" "lambda_permissions" {
     actions   = ["dynamodb:GetItem", "dynamodb:PutItem"]
     resources = [aws_dynamodb_table.links.arn] # this table only, not every table
   }
-  # Log permissions are added in part C, together with the log group
+
+  # Write logs only to the function's own log group.
+  statement {
+    sid       = "WriteOwnLogs"                                # label for this rule
+    effect    = "Allow"                                       # allow (everything else stays denied)
+    actions   = ["logs:CreateLogStream", "logs:PutLogEvents"] # create a log stream, then write lines to it
+    resources = ["${aws_cloudwatch_log_group.lambda.arn}:*"]  # any stream, but only in this log group
+  }
 }
 
 # Inline policy: belongs to this role only and is deleted together with it.

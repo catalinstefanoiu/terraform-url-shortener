@@ -7,7 +7,7 @@ resource "aws_dynamodb_table" "links" {
 
 
   # Only key attributes are declared here; other fields (url, created_at)
-  # are added by the application without any Sschema.
+  # are added by the application without any Schema.
   attribute {
     name = "code"
     type = "S" # S = string

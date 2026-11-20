@@ -148,14 +148,26 @@ var.aws_region ─► provider region ──────────────
   - **Argument Reference**: ce **scrii** în bloc (*Required* = obligatoriu, *Optional* = opțional).
   - **Attribute Reference**: ce poți **citi** după creare (`.arn`, `.id`, `.json`).
   - **Import**: cum aduci în Terraform o resursă creată manual.
+  - Pe paginile generate automat (de exemplu providerul `archive`), aceleași informații stau sub **Schema**: *Required* + *Optional* = ce scrii, *Read-Only* = ce citești.
+- Metoda mea: copiez din **Example Usage** exemplul cel mai apropiat, apoi verific fiecare linie în Argument Reference (sau Schema). Example Usage arată adesea și alte resurse legate între ele, de exemplu Lambda + rol + zip.
 - Versiunea providerului se alege din meniul din stânga sus. `latest` e ok cât timp suntem pe 6.x.
 - În VS Code: mouse-ul pe tipul resursei arată descrierea și un link spre documentație.
+- **Cum adaug un provider nou** (de exemplu `archive`):
+  - Pe pagina providerului (`registry.terraform.io/providers/hashicorp/archive`), butonul **USE PROVIDER** (dreapta sus) dă blocul gata făcut pentru `required_providers`.
+  - Acolo versiunea e fixată exact (`"2.8.1"`). Eu o schimb în `"~> 2.8"`, ca să accept versiunile noi compatibile (2.8.x, 2.9…), dar nu 3.0, care poate strica ceva.
+  - Al doilea bloc din snippet, `provider "archive" {}`, poate lipsi dacă pagina **Overview** spune *„requires no configuration”*. AWS, în schimb, are nevoie de `region`, deci de `providers.tf`.
+  - Fără declarare, Terraform ghicește singur `hashicorp/archive` (după prefixul `archive_` din `archive_file`), dar fără limită de versiune. De aceea îl declarăm explicit.
 
 **Limbajul Terraform**: developer.hashicorp.com/terraform/language (variabile, data sources, `lifecycle`…).
 
 **AWS**:
 - docs.aws.amazon.com: ghidul fiecărui serviciu.
 - **Service Authorization Reference**: lista exactă de acțiuni IAM ale unui serviciu (de exemplu `dynamodb:GetItem`) și pe ce ARN-uri se aplică.
+- **Rețeta pentru un `statement` IAM** (exemplu: logurile Lambda):
+  1. **Ce acțiuni?** Ghidul serviciului sau politica gestionată de AWS pentru cazul meu. `AWSLambdaBasicExecutionRole` = `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents` pe `"*"`.
+  2. **Pe ce ARN?** Service Authorization Reference, secțiunea **Actions** (nu *Operations*: acolo scrie doar ce permisiuni cere un apel API). Steluța din `log-group*` înseamnă **obligatoriu** (antetul coloanei e *Resource types (\*required)*), nu „orice”. Coloana *Resource types* spune pe ce resursă lucrează acțiunea: `CreateLogStream` și `PutLogEvents` → `log-stream*`, cu ARN-ul `…:log-group:<grup>:log-stream:<stream>`. De aici vine `"${…log_group.arn}:*"`.
+  3. **Cum scriu în Terraform?** Pagina `aws_iam_policy_document` (statement, sid, effect, actions, resources) + Attribute Reference la resursa țintă (`aws_cloudwatch_log_group.arn`, fără `:*` la final).
+  4. **Strâng drepturile:** exemplele din documentație sunt largi (`"*"`, `arn:aws:logs:*:*:*`). Eu scot ce face deja Terraform (`CreateLogGroup`) și limitez resursa la grupul meu.
 
 | Subiect | Link |
 |---|---|
@@ -164,13 +176,22 @@ var.aws_region ─► provider region ──────────────
 | `aws_iam_role` | https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role |
 | `aws_iam_role_policy` | https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy |
 | `aws_dynamodb_table` | https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/dynamodb_table |
+| `aws_lambda_function` | https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lambda_function |
+| `aws_cloudwatch_log_group` | https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_group |
+| `archive_file` | https://registry.terraform.io/providers/hashicorp/archive/latest/docs/data-sources/file |
+| Providerul `archive` (USE PROVIDER) | https://registry.terraform.io/providers/hashicorp/archive/latest |
+| `required_providers` | https://developer.hashicorp.com/terraform/language/providers/requirements |
+| Variabilele puse automat de Lambda | https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars-runtime.html |
+| Constrângeri de versiune (`~>`) | https://developer.hashicorp.com/terraform/language/expressions/version-constraints |
 | Data sources (limbaj) | https://developer.hashicorp.com/terraform/language/data-sources |
 | `TF_LOG` (debugging) | https://developer.hashicorp.com/terraform/internals/debugging |
 | Roluri IAM | https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles.html |
 | Chei temporare (STS) | https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp.html |
 | Rolul de execuție Lambda | https://docs.aws.amazon.com/lambda/latest/dg/lambda-intro-execution-role.html |
 | Elementele unei politici JSON | https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements.html |
-| Acțiunile IAM pentru DynamoDB | https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazondynamodb.html |
+| Acțiunile IAM pentru DynamoDB | https://docs.aws.amazon.com/service-authorization/latest/reference/list_dynamodb.html |
+| Acțiunile IAM pentru CloudWatch Logs | https://docs.aws.amazon.com/service-authorization/latest/reference/list_logs.html |
+| Politica `AWSLambdaBasicExecutionRole` | https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AWSLambdaBasicExecutionRole.html |
 | Formatul ARN | https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_identifiers.html |
 
 ---
@@ -205,16 +226,25 @@ Terraform lucrează cu trei piese:
 - **`locals`**: valori calculate o singură dată și refolosite (prefixe de nume, tag-uri comune). Se folosesc cu `local.nume`. Nu pot fi schimbate din exterior.
 - **`output`**: o valoare afișată după `apply`, pe care o citești cu `terraform output`. Pe outputs se bazează legătura cu alte unelte și, mai târziu, cu alte module.
 - **`data`** (data source): **citește** informații care există deja (de exemplu ID-ul contului), fără să creeze nimic. Se folosește cu `data.tip.nume.atribut`.
-- Data sources de două feluri: unele **întreabă AWS** (`aws_caller_identity` face un apel STS `GetCallerIdentity` la fiecare `plan`), altele doar **calculează local** (`aws_iam_policy_document`). Cum le deosebești:
+- Data sources de două feluri: unele **întreabă AWS** (`aws_caller_identity` face un apel STS `GetCallerIdentity` la fiecare `plan`), altele doar **calculează local** (`aws_iam_policy_document`, `archive_file`, care face zip-ul pe laptop). Cum le deosebești:
   - **Regula:** dacă rezultatul conține ceva ce n-ai scris nicăieri (ID-ul contului), vine din AWS. Dacă e făcut doar din ce i-ai dat, e calcul local.
   - **Documentația** (registry.terraform.io): „Use this data source to **get**…” înseamnă că întreabă AWS, „**Generates**…” înseamnă că calculează local.
   - **Dovada:** `TF_LOG=DEBUG terraform plan 2>&1 | grep "HTTP Request Sent" | grep -o "rpc.method=[^ ]*" | sort | uniq -c` listează fiecare apel API pe care îl face planul.
 - Un `plan` face apeluri pentru: citirea state-ului din S3 (`S3/GetObject`), verificarea identității (`STS/GetCallerIdentity`) și **refresh**, adică citirea fiecărei resurse din state ca să vadă dacă s-a schimbat ceva în AWS (`DynamoDB/DescribeTable`).
 - `data "aws_iam_policy_document"`: scrii politica IAM în HCL în loc de JSON, iar `.json` ți-o dă gata convertită. Nu întreabă AWS nimic, doar generează text local, verificat de Terraform.
 - **Interpolare**: `"${var.a}-${local.b}"` construiește un string din alte valori.
+- Poți avea **mai multe blocuri `locals`**, în fișiere diferite. Terraform le adună pe toate.
+- `path.module` = folderul în care stă fișierul `.tf`. Se folosește la căi relative (`"${path.module}/app/dist/index.js"`).
+- `depends_on = [...]` = dependență explicită, pentru cazul în care Terraform nu o poate deduce din referințe.
+- Resursele **independente** se creează **în paralel** (până la 10 odată). La C3, funcția Lambda a început să se creeze înainte să se termine actualizarea politicii, pentru că nu depinde de ea. De aceea exemplul oficial pune și politica în `depends_on`: funcția nu poate rula fără drepturile de log.
+- Un **provider nou** (de exemplu `hashicorp/archive`) cere `terraform init`, care îl descarcă și îl adaugă în lock file.
 - **`default_tags`** în provider: tag-uri puse automat pe **toate** resursele, ca să nu le repeți la fiecare.
 - Variabilă **fără `default`** = obligatorie: Terraform cere valoarea la `plan`.
 - Prefixe: `var.x`, `local.x`, `data.tip.nume.atribut`. O resursă se referă fără prefix: `aws_s3_bucket.first.arn`.
+- **`tip.nume.atribut`**: `aws_dynamodb_table.links.name` = tipul (din provider) + numele local (ales de mine, `"links"`) + atributul citit (din Attribute Reference).
+  - Orice **argument** pe care îl scriu se poate citi și ca atribut: `aws_lambda_function.api.function_name`. La Attribute Reference scrie *„…exports the following attributes in addition to the arguments above”*.
+  - Data sources au în plus prefixul `data.`, deci 4 bucăți: `data.archive_file.lambda.output_path`.
+  - Ce atribut pun într-un argument îmi spune **Argument Reference**-ul resursei care îl primește. Exemple: `aws_lambda_function.role` cere **ARN**-ul rolului (`.arn`), iar `aws_iam_role_policy.role` cere **numele** (`.id`, care la rol e chiar numele).
 - `local` vs `variable`: variabila vine din exterior, local-ul e un calcul intern, pe care nu-l poate suprascrie nimeni.
 
 ### Valori pentru variabile (de la cea mai slabă la cea mai puternică)
@@ -321,6 +351,8 @@ outputs.tf:    bucket_name = aws_s3_bucket.first.bucket
 - O valoare care **depinde** de o resursă încă necreată apare tot `(known after apply)`, de exemplu `bucket = aws_s3_bucket.state.id`.
 - Planul listează resursele **alfabetic**, nu în ordinea execuției. Ordinea reală o vezi la `apply`.
 - Data source-urile apar ca `Reading...` la începutul planului: sunt citite înainte de orice altceva.
+- **`<=` read (data resources)** + *„will be read during apply (config refers to values not yet known)”*: data source-ul depinde de o valoare care nu există încă. Exemplu: `lambda_permissions` are nevoie de ARN-ul log group-ului, care încă nu e creat. Terraform îl citește abia la `apply`.
+  - Efect secundar: resursa care îl folosește (`aws_iam_role_policy`) arată tot JSON-ul vechi cu `-` și `-> (known after apply)`. Pare că se șterge tot, dar e doar „noul conținut încă nu se știe”. Noua politică va conține ambele reguli.
 - `Changes to Outputs`: ce outputs se vor schimba după `apply`.
 - `Refreshing state...`: înainte de plan, Terraform citește starea reală din AWS. Așa observă și schimbările făcute de altcineva din consolă.
 - Ultimul rând e rezumatul, de citit mereu: `Plan: 1 to add, 0 to change, 0 to destroy.`
@@ -411,7 +443,18 @@ outputs.tf:    bucket_name = aws_s3_bucket.first.bucket
 - Răspunsul: `{ statusCode, headers, body }`. `302` + header-ul `location` = redirect temporar: browserul nu-l ține minte, deci fiecare click trece prin Lambda.
 - `return` cu 4xx = răspuns normal. `throw` = **eroare de funcție**: API Gateway răspunde 500 și crește metrica **Errors**, pe care o urmărește alarma din partea E.
 - **Scriere condiționată**: `ConditionExpression: "attribute_not_exists(code)"` scrie doar dacă cheia nu există. Altfel DynamoDB aruncă `ConditionalCheckFailedException`, iar codul încearcă alt cod.
+- În Terraform (`lambda.tf`):
+  - `data "archive_file"` face zip-ul din `app/dist/index.js`, chiar în timpul lui `plan`. Trebuie rulat `npm run build` înainte.
+  - `output_file_mode = "0666"`: aceleași permisiuni de fișier în zip pe Windows și pe Linux (CI-ul din etapa 8), deci aceeași amprentă. Altfel planul ar cere update fără motiv.
+  - `code_sha256` = amprenta zip-ului (`output_base64sha256`). Cod nou → amprentă nouă → Terraform urcă noua versiune. Terraform o compară cu amprenta reală din AWS (`CodeSha256`), deci vede și codul urcat manual din consolă (drift). Varianta veche, `source_code_hash`, e ținută doar în state și nu vede asta. `code_sha256` e opțional din providerul AWS 6.27.
+  - `handler = "index.handler"` = fișierul `index.js` + funcția exportată `handler`.
+  - `architectures = ["arm64"]` = procesoare Graviton, mai ieftine decât x86.
+  - Log group-ul `/aws/lambda/<nume>` îl creăm noi, cu `retention_in_days`. Altfel Lambda l-ar crea singură, fără limită de timp și în afara Terraform.
+  - API-ul AWS dă ARN-ul grupului **cu** `:*` la final (`aws logs describe-log-groups`). Terraform îl scoate din atributul `.arn`, deci în politică îl pui tu înapoi.
+  - Verificare după apply: `CodeSha256` din `aws lambda get-function-configuration` = `code_sha256` din plan, adică AWS are exact zip-ul de pe laptop.
 - Variabilele de mediu (`process.env.TABLE_NAME`) sunt setate din Terraform. Codul nu conține nume de resurse scrise direct. Le vezi în consolă (Lambda → Configuration → Environment variables) sau cu `aws lambda get-function-configuration --function-name <nume> --query Environment`. Pe laptop nu există, deci `process.env.TABLE_NAME` e `undefined`.
+- **`process.env`**: `process` = obiectul global Node.js care descrie programul pornit. `env` = **variabilele de mediu**, perechi `NUME=valoare` primite de program la pornire, de la cine îl lansează (Windows, Lambda). E același lucru ca `$env:USERNAME` în PowerShell.
+- Lambda pune singură și variabile proprii: `AWS_REGION` (de aici știe `new DynamoDBClient({})` regiunea) și `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`, adică cheile temporare **ASIA…** ale rolului, din STS. SDK-ul le citește singur, deci în cod nu apar chei.
 - Rutele HTTP API au **șabloane**: `GET /{code}`. Pentru adresa `/k3x9Qa`, evenimentul conține `routeKey: "GET /{code}"` (șablonul), `rawPath: "/k3x9Qa"` (adresa reală) și `pathParameters: { code: "k3x9Qa" }` (ce a „umplut” golul `{code}`). `routeKey` trebuie scris exact, cu spațiu: `"GET /{code}"`.
 - `{code}` prinde **o singură** bucată de drum (`/k3x9Qa`, dar nu `/a/b`). Ca să prinzi mai multe bucăți există `{proxy+}`. Dacă nicio rută nu se potrivește, API Gateway răspunde singur `404 {"message":"Not Found"}`, iar Lambda nici nu e chemată.
 - `GET /links` se potrivește cu `GET /{code}` (cu `code = "links"`), pentru că metoda contează: `POST /links` e altă regulă.
@@ -511,4 +554,5 @@ Câmpul de regiune e gol la IAM, pentru că IAM e global. Exemplu cu toate câmp
 - **Auto-import în VS Code:** când scrii un nume care încă nu există (de exemplu `json`), VS Code poate adăuga singur un `import` greșit sus în fișier (`import { json } from "node:stream/consumers"`). Verifică importurile după ce scrii cod. Când apare lista de sugestii, `Esc` o închide fără să accepte nimic. Auto-importurile se pot opri din Settings, căutând „auto imports”.
 - `Shift+Alt+F` (Format Document) aranjează indentarea codului TypeScript.
 - Dacă lași o ghilimea deschisă, Bash așteaptă continuarea comenzii (`>`). `Ctrl+C` anulează.
+- **Git Bash strică argumentele care încep cu `/`**: crede că sunt căi Linux și le transformă în `C:/Program Files/Git/...`. Exemplu: `/aws/lambda/...` dă eroarea `failed to satisfy constraint`. Soluția: `MSYS_NO_PATHCONV=1` în fața comenzii (`MSYS_NO_PATHCONV=1 aws logs tail /aws/lambda/...`). În PowerShell nu apare problema.
 - În **PowerShell 5.1**, JSON-ul trimis la `aws` pierde ghilimelele. Le scrii ca `\"` în interiorul `'...'`, de exemplu `'{\"code\":{\"S\":\"test1\"}}'`. În Git Bash merge JSON-ul normal.
