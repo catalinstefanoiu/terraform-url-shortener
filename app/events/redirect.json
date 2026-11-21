@@ -1,0 +1,13 @@
+{
+  "version": "2.0",
+  "routeKey": "GET /{code}",
+  "rawPath": "/X9Mfff",
+  "pathParameters": {
+    "code": "X9Mfff"
+  },
+  "requestContext": {
+    "domainName": "test-api.example.com",
+    "requestId": "test-redirect-1"
+  },
+  "isBase64Encoded": false
+}

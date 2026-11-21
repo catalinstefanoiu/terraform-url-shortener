@@ -18,3 +18,8 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
+
+# Node.js: installed packages and build output (stage 5)
+node_modules/
+dist/
+build/

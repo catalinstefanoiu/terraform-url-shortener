@@ -28,3 +28,15 @@ variable "environment" {
     error_message = "environment must be either \"dev\" or \"prod\"."
   }
 }
+
+variable "alert_email" {
+  description = "Email address that receives the alarm notifications"
+  type        = string
+  sensitive   = true # hidden in plan/apply output (still stored in the state file)
+  # No default: the value comes from terraform.tfvars, which Git ignores
+
+  validation {
+    condition     = can(regex("^[^@ ]+@[^@ ]+[.][^@ ]+$", var.alert_email)) # something@something.something
+    error_message = "alert_email must look like an email address, e.g. name@example.com."
+  }
+}
