@@ -2,22 +2,25 @@
 
 Ce am învățat pe parcursul proiectului, pe scurt. Se actualizează la fiecare etapă.
 
-## Harta proiectului (etapa 5, după partea B)
+## Harta proiectului (sfârșitul etapei 5)
 
 ```
-LAPTOP (D:\Projects\terraform-url-shortener)           AWS (eu-north-1, IAM e global)
+LAPTOP (D:\Projects\terraform-url-shortener)          AWS (eu-north-1, IAM e global)
 ┌──────────────────────────────────────┐
-│ bootstrap/  (state LOCAL)            │ ── apply ──►  url-shortener-tfstate-…   (versioning, criptare,
-│   main.tf, outputs.tf                │                 └─ dev/terraform.tfstate   fără acces public)
-└──────────────────────────────────────┘                    ▲        │
-┌──────────────────────────────────────┐                    │ citește/scrie state
-│ rădăcina  (state REMOTE, în S3)      │ ───────────────────┘        │ + .tflock cât rulează
-│   versions.tf backend.tf providers.tf│
-│   variables.tf locals.tf             │ ── apply ──►  url-shortener-dev-links      (tabel DynamoDB)
-│   dynamodb.tf iam.tf outputs.tf      │               url-shortener-dev-lambda     (rol IAM + politică)
-└──────────────────────────────────────┘
-        │ git push → PR → squash merge
-        ▼
+│ bootstrap/  (state LOCAL)            │ ── apply ──►  url-shortener-tfstate-…  (versioning, criptare,
+│   main.tf, outputs.tf                │                 └─ dev/terraform.tfstate  fără acces public)
+└──────────────────────────────────────┘                    ▲
+┌──────────────────────────────────────┐                    │ citește/scrie state (+ .tflock cât rulează)
+│ rădăcina  (state REMOTE, în S3)      │ ───────────────────┘
+│   versions backend providers         │
+│   variables locals outputs           │ ── apply ──►  client ──► API Gateway HTTP API ($default, 5/10 cereri/s)
+│   dynamodb iam lambda apigateway     │                             │  POST /links   GET /{code}
+│   monitoring  (+ terraform.tfvars,   │                             ▼
+│               care nu urcă în Git)   │               Lambda url-shortener-dev-api  (rol IAM …-lambda)
+│ app/  handler.ts → esbuild → zip     │                  │ PutItem/GetItem     │ loguri          │ metrica Errors
+└──────────────────────────────────────┘                  ▼                     ▼                 ▼
+        │ git push → PR → squash merge          DynamoDB …-links    CloudWatch Logs   alarmă → SNS → email
+        ▼                                                            (14 zile)
 GITHUB: catalinstefanoiu/terraform-url-shortener   (codul, fără state și fără secrete)
 ```
 
@@ -32,7 +35,12 @@ GITHUB: catalinstefanoiu/terraform-url-shortener   (codul, fără state și făr
 | `locals.tf` | `data "aws_caller_identity"` + `locals` | calcule interne: ID-ul contului, prefixul de nume, tag-urile comune |
 | `dynamodb.tf` | `resource "aws_dynamodb_table" "links"` | baza de date: cod scurt → URL lung |
 | `iam.tf` | 2 × `data "aws_iam_policy_document"`, `aws_iam_role`, `aws_iam_role_policy` | identitatea lui Lambda (cine o poate purta) + ce are voie să facă |
-| `outputs.tf` | `account_id`, `table_name` | ce afișează Terraform după `apply` |
+| `lambda.tf` | `data "archive_file"`, `aws_cloudwatch_log_group`, `aws_lambda_function` | zip-ul codului, logurile (14 zile) și funcția |
+| `apigateway.tf` | API, integrare, 2 rute, stage `$default`, `aws_lambda_permission` | adresa publică care trimite cererile la funcție |
+| `monitoring.tf` | `aws_sns_topic`, `aws_sns_topic_subscription`, `aws_cloudwatch_metric_alarm` | email când funcția dă erori (partea E) |
+| `outputs.tf` | `account_id`, `table_name`, `function_name`, `api_url` | ce afișează Terraform după `apply` |
+| `terraform.tfvars` | `alert_email = "…"` | valorile mele personale; **nu** urcă pe GitHub (`*.tfvars` în `.gitignore`) |
+| `app/` | `src/handler.ts`, `events/*.json`, `package.json`, `tsconfig.json` | codul TypeScript al funcției + evenimente de test |
 | `bootstrap/main.tf` | bucket de state + versioning, criptare, acces public blocat | rulat o singură dată, cu state local |
 | `bootstrap/outputs.tf` | `state_bucket_name` | numele bucket-ului de state (copiat în `backend.tf`) |
 | `.gitignore` | ce NU urcă pe GitHub | state, `.terraform/`, `*.tfvars`, planuri salvate |
@@ -482,6 +490,8 @@ outputs.tf:    bucket_name = aws_s3_bucket.first.bucket
   - `REPORT`: `Duration` = cât a rulat handler-ul. `Init Duration` = cold start-ul. `Billed Duration` ≈ Init + Duration, rotunjit în sus (din 2025, AWS taxează și init-ul). `Max Memory Used` din `Memory Size`.
   - Prima rulare: aproximativ 800 ms doar pentru primul `PutItem` (conexiune nouă, chei, TLS). Rulările următoare pe aceeași instanță („warm”) sunt mult mai rapide.
   - Numele log stream-ului: `2026/11/20/[$LATEST]<id>` = un stream pentru fiecare instanță. E bucata acoperită de `:*` din politică.
+    - **Stream nou = instanță nouă, nu cerere nouă.** Toate cererile servite de o instanță „warm” se adaugă în **același** stream. La D, cererile de la 17:15 până la 17:20 sunt toate într-un singur stream.
+    - Coloana **Last event time** din consolă se actualizează cu întârziere, de obicei sub o oră (*„eventual consistency”*, din documentația `LogStream`). Pentru loguri proaspete: deschid stream-ul, folosesc **Search log group** sau rulez `aws logs tail`.
   - **Cold vs warm, măsurat la C4:**
 
     | Apel | Instanță | Duration |
@@ -536,6 +546,41 @@ outputs.tf:    bucket_name = aws_s3_bucket.first.bucket
   - În **Git Bash**, JSON-ul se scrie între apostrofuri, fără backslash: `-d '{"url": "https://..."}'`. Între apostrofuri, bash nu interpretează nimic, deci `\"` ar ajunge la server exact ca `\"`, adică JSON invalid → **400** de la codul meu.
   - În **PowerShell 5.1**: `curl.exe` (simplul `curl` e alias pentru `Invoke-WebRequest`), iar ghilimelele din JSON trebuie scrise `\"`.
   - Headerul `Apigw-Requestid` din răspuns = `event.requestContext.requestId` din logul Lambda, deci așa găsesc logul unei cereri.
+
+### CloudWatch Alarms și SNS (partea E: alertă pe email)
+
+```
+Lambda ──► metrica AWS/Lambda Errors ──► alarma (Sum ≥ 1 în 60 s?) ──► topic SNS ──► email
+```
+
+- **SNS** (Simple Notification Service) = un **topic**, ca o cutie poștală: cine publică în el (alarma) trimite un mesaj, iar fiecare **abonat** (subscription: email, SMS, Lambda, SQS…) primește o copie.
+- Abonarea pe **email** trebuie **confirmată**. AWS trimite emailul „AWS Notification - Subscription Confirmation" (uită-te și în Spam). Până dau click pe „Confirm subscription", abonarea e `PendingConfirmation` și nu primesc nimic.
+  - Terraform **nu poate șterge** o abonare neconfirmată: la `destroy` o scoate din state, dar ea rămâne în AWS. Dacă șterg topic-ul, SNS șterge și abonările lui.
+- **Alarma** urmărește o **metrică**, adică un număr măsurat la intervale: `namespace = "AWS/Lambda"`, `metric_name = "Errors"`, filtrat cu `dimensions = { FunctionName = … }`. La fiecare `period` (60 s) calculează `statistic` (`Sum`) și îl compară cu `threshold` (1).
+  - Stări: `OK`, `ALARM`, `INSUFFICIENT_DATA`. `alarm_actions` rulează la intrarea în ALARM, iar `ok_actions` la revenirea în OK.
+  - `treat_missing_data = "notBreaching"`: fără trafic nu există puncte de date, și le consider „bune". Implicit e `missing`, iar alarma ar sta în `INSUFFICIENT_DATA`.
+  - `actions_enabled` (implicit `true`) e întrerupătorul general. La **orice** schimbare de stare rulează lista potrivită: `ok_actions`, `alarm_actions` sau `insufficient_data_actions`. Cu `false`, alarma își schimbă în continuare starea, dar nu trimite nimic, ceea ce e util la mentenanță.
+  - Verificare:
+    - `aws cloudwatch describe-alarm-history --alarm-name <nume>` arată istoria alarmei: `ConfigurationUpdate` (creată), `StateUpdate` (de exemplu INSUFFICIENT_DATA → OK) și `Action` („Successfully executed action arn:aws:sns:…").
+    - `aws sns list-subscriptions-by-topic --topic-arn <arn>` arată `PendingConfirmation` până la click, apoi ARN-ul abonării.
+- **Testul alarmei:** `aws lambda invoke … --payload fileb://app/events/create-link-error.json`. Evenimentul nu are `requestContext`, deci `handler.ts:58` aruncă `TypeError`.
+  - Pe ecran apare `"StatusCode": 200` + `"FunctionError": "Unhandled"`: Lambda a rulat funcția, dar funcția a crăpat.
+  - În `response.json` apar `errorType`, `errorMessage`, `trace` (lista de apeluri, numită `stackTrace` în documentația generală AWS) și `requestId`.
+  - În log apare linia `ERROR Invoke Error {…}`, cu același `requestId`.
+  - Emailul vine de la `no-reply@sns.amazonaws.com`, cu subiectul `ALARM: "<alarmă>" in EU (Stockholm)` și motivul `Threshold Crossed: 1 datapoint [1.0 …]`.
+- **ALARM nu revine în OK imediat.** La fiecare evaluare, alarma citește mai multe puncte în urmă, nu doar ultimul. Fereastra asta se numește **evaluation range**. Cât timp punctul cu eroarea e încă în fereastră, alarma decide după el și rămâne în ALARM. După ce iese din fereastră, toate punctele lipsesc, `notBreaching` le consideră bune și alarma trece în OK. La testul meu: eroarea în minutul 10:12, ALARM la 10:13:56, OK la 10:19:56 (UTC), adică două emailuri la 6 minute unul după altul.
+- **Eșec parțial:** `PutItem` s-a făcut **înainte** de linia care a crăpat, deci itemul există în tabel, dar clientul a primit eroare și nu știe codul. O eroare nu anulează ce s-a scris deja.
+  - La noi **nu cere reparat**. Prin API Gateway, `requestContext` există mereu. Cel mai rău caz e un link „orfan”: câțiva bytes pe care nu-i folosește nimeni, fără date stricate și fără risc de securitate.
+  - Regula generală: **întâi tot ce poate eșua, scrierea la final**. Validezi și calculezi înainte de `PutItem`, ca o eroare să vină înainte de scriere, nu după.
+  - Când contează cu adevărat (plăți, comenzi):
+    - **idempotență**: clientul trimite o cheie unică, iar a doua cerere cu aceeași cheie primește același răspuns, fără o a doua scriere. Biblioteca Powertools for AWS Lambda are un utilitar pentru asta.
+    - **tranzacții** DynamoDB (`TransactWriteItems`): mai multe scrieri care reușesc toate sau niciuna.
+- **Nu da click pe „unsubscribe”** din email. Abonarea s-ar șterge din AWS, iar următorul `plan` ar vrea s-o creeze din nou, cu încă un email de confirmare.
+- **Ce numără `Errors`:** doar invocările care se termină cu **eroare**: o excepție aruncată de cod, un timeout, o eroare de runtime. Răspunsurile **400/404** date de codul meu **nu** sunt erori pentru Lambda, pentru că funcția a mers și doar răspunsul e „nu". În `handler.ts`, metrica crește din `throw err` și `throw new Error(...)`.
+- `sensitive = true` pe o variabilă o ascunde în plan/apply (`(sensitive value)`), dar în **state** valoarea stă în clar, deci state-ul trebuie ținut privat (al meu e în S3, fără acces public).
+- O variabilă **fără `default`** se citește din `terraform.tfvars` (ignorat de Git, regula `*.tfvars`). Dacă nu o găsește, Terraform o cere la tastatură.
+- În regex, `.` înseamnă orice caracter, iar `[.]` înseamnă chiar punctul. E mai simplu decât `\\.`, care în HCL trebuie scris cu două backslash-uri.
+- Costul intră în nivelul gratuit: 10 alarme standard și 1.000 de emailuri SNS pe lună.
 
 ### ARN (Amazon Resource Name)
 
@@ -641,3 +686,20 @@ Câmpul de regiune e gol la IAM, pentru că IAM e global. Exemplu cu toate câmp
 - Dacă lași o ghilimea deschisă, Bash așteaptă continuarea comenzii (`>`). `Ctrl+C` anulează.
 - **Git Bash strică argumentele care încep cu `/`**: crede că sunt căi Linux și le transformă în `C:/Program Files/Git/...`. Exemplu: `/aws/lambda/...` dă eroarea `failed to satisfy constraint`. Soluția: `MSYS_NO_PATHCONV=1` în fața comenzii (`MSYS_NO_PATHCONV=1 aws logs tail /aws/lambda/...`). În PowerShell nu apare problema.
 - În **PowerShell 5.1**, JSON-ul trimis la `aws` pierde ghilimelele. Le scrii ca `\"` în interiorul `'...'`, de exemplu `'{\"code\":{\"S\":\"test1\"}}'`. În Git Bash merge JSON-ul normal.
+
+## Diagrame de arhitectură
+
+- `docs/serverless-url-shortener.drawio`: diagrama oficială a etapei 5, cu iconițe AWS, făcută cu pluginul **deploy-on-aws** (skill-ul `aws-architecture-diagram`) din fișierele `.tf`.
+- Un fișier `.drawio` e **XML**: text cu forme (`mxCell`), poziții și săgeți (`source` → `target`). Se poate citi și versiona în Git ca orice cod.
+- Cum îl deschid:
+  - în browser, pe **app.diagrams.net** → File → Open from → Device;
+  - în VS Code, cu extensia **Draw.io Integration**;
+  - pentru README: din draw.io, **File → Export as → SVG/PNG**, apoi pun imaginea în `docs/`.
+- Pluginuri instalate pentru diagrame: **deploy-on-aws** (de la AWS, cu draw.io și iconițele oficiale) și **Deezle Tech Diagrams** (Mermaid din Terraform, activ dintr-o sesiune nouă).
+- Whiteboard făcut cu metoda Deezle (privat, pe claude.ai): [URL shortener stage 5](https://claude.ai/artifact/XtnjZTYbBGi8AvGUohLSXx).
+- **Regula Deezle: ce devine nod în desen.** Un desen arată doar **serviciile** pe care un om le-ar arăta cu degetul (API Gateway, Lambda, DynamoDB). Restul se **pliază** în serviciul pe care îl configurează:
+  - rute, integrare, stage → în API Gateway;
+  - rol IAM, politică, log group → în Lambda;
+  - `aws_lambda_permission` (leagă două resurse) → devine **săgeata** dintre ele;
+  - `archive_file` e un ajutor local, deci nu apare.
+  - Săgeata merge în direcția în care circulă **cererea**, nu în direcția referinței din cod.

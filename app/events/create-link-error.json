@@ -1,0 +1,7 @@
+{
+  "version": "2.0",
+  "routeKey": "POST /links",
+  "rawPath": "/links",
+  "body": "{\"url\": \"https://example.com/alarm-test\"}",
+  "isBase64Encoded": false
+}
